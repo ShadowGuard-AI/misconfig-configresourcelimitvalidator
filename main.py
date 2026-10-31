@@ -109,11 +109,16 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
     """
     results = {}
     try:
+        if not isinstance(config, dict) or not config:
+            results["error"] = {"status": "ERROR", "message": "No configuration data to validate: the config is empty or is not a mapping."}
+            return results
         # Check CPU limit
         if cpu_limit_key in config:
             cpu_limit = config[cpu_limit_key]
-            if not isinstance(cpu_limit, (int, float)):
+            if isinstance(cpu_limit, bool) or not isinstance(cpu_limit, (int, float)):
                 raise ValueError(f"Invalid CPU limit value: {cpu_limit}. Must be a number.")
+            if cpu_limit <= 0:
+                raise ValueError(f"Invalid CPU limit value: {cpu_limit}. Must be greater than zero.")
             
             cpu_count = psutil.cpu_count()
             if cpu_limit > cpu_count:
@@ -129,14 +134,21 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
         # Check memory limit
         if memory_limit_key in config:
             memory_limit = config[memory_limit_key]
-            if not isinstance(memory_limit, (int, float)):
+            if isinstance(memory_limit, bool) or not isinstance(memory_limit, (int, float)):
                 raise ValueError(f"Invalid memory limit value: {memory_limit}. Must be a number.")
+            if memory_limit <= 0:
+                raise ValueError(f"Invalid memory limit value: {memory_limit}. Must be greater than zero.")
 
-            # Convert memory limit to bytes if necessary (assuming it's in MB or GB)
-            if isinstance(memory_limit, float) and memory_limit < 100: #arbitrary cutoff for potentially being in GB vs bytes.  Will need adjusted based on use case
-                 memory_limit_bytes = int(memory_limit * 1024 * 1024 * 1024) #convert GB to bytes
+            # The unit is explicit, never guessed from the value type or size.
+            # The config may set memory_limit_unit to "MB" or "GB"; when the
+            # unit key is absent the documented unit is MB.
+            memory_unit = str(config.get("memory_limit_unit", "MB")).upper()
+            if memory_unit in ("MB", "MIB"):
+                memory_limit_bytes = int(memory_limit * 1024 * 1024)
+            elif memory_unit in ("GB", "GIB"):
+                memory_limit_bytes = int(memory_limit * 1024 * 1024 * 1024)
             else:
-                 memory_limit_bytes = int(memory_limit * 1024 * 1024) #convert MB to bytes
+                raise ValueError(f"Invalid memory_limit_unit value: {memory_unit}. Must be 'MB' or 'GB'.")
 
             virtual_memory = psutil.virtual_memory()
             total_memory = virtual_memory.total
@@ -153,10 +165,10 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
 
     except ValueError as e:
         logging.error(f"Validation error: {e}")
-        results["error"] = str(e)
+        results["error"] = {"status": "ERROR", "message": str(e)}
     except Exception as e:
         logging.exception("An unexpected error occurred during validation:")
-        results["error"] = f"An unexpected error occurred: {e}"
+        results["error"] = {"status": "ERROR", "message": f"An unexpected error occurred: {e}"}
 
     return results
 
@@ -190,6 +202,14 @@ def main():
             # is higher than available cores, a crafted request might be sent to try to exhaust
             # resources, causing a denial of service.  This is a placeholder only.
             # offensive_action(config)  # Placeholder for offensive action
+
+        statuses = [r.get("status") for r in results.values() if isinstance(r, dict)]
+        if "error" in results or "ERROR" in statuses or "WARNING" in statuses:
+            sys.exit(1)
+        if statuses and all(s == "INFO" for s in statuses):
+            logging.error("No resource limits were validated: neither limit key is present in the configuration.")
+            print("No resource limits were validated: neither limit key is present in the configuration.")
+            sys.exit(1)
 
     except FileNotFoundError as e:
         logging.error(e)
