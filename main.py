@@ -113,13 +113,29 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
             results["error"] = {"status": "ERROR", "message": "No configuration data to validate: the config is empty or is not a mapping."}
             return results
         # Check CPU limit
+        # Only the top level is read, and the key names are plain
+        # names, not paths. Limits nested under a resources section
+        # are invisible here, and the run reports both limits as not
+        # specified rather than looking any deeper.
         if cpu_limit_key in config:
             cpu_limit = config[cpu_limit_key]
             if isinstance(cpu_limit, bool) or not isinstance(cpu_limit, (int, float)):
+                # Raising here ends the whole validation, not just this check.
+                # The outer handler records one error result and the memory
+                # check below never runs, so a file with a bad CPU value and a
+                # bad memory value only ever reports the first of them. The
+                # memory block has the same shape, reached only when the CPU
+                # value was acceptable or absent.
                 raise ValueError(f"Invalid CPU limit value: {cpu_limit}. Must be a number.")
             if cpu_limit <= 0:
                 raise ValueError(f"Invalid CPU limit value: {cpu_limit}. Must be greater than zero.")
             
+            # cpu_count counts logical cores, hyperthreads included, and
+            # my comparison reads the config value as a count of cores.
+            # A limit written as a percentage, or as a fractional quota of
+            # half a core, is judged against that core count anyway,
+            # because nothing in the config or in my code records which
+            # unit the author meant.
             cpu_count = psutil.cpu_count()
             if cpu_limit > cpu_count:
                 results["cpu"] = {
@@ -142,6 +158,11 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
             # The unit is explicit, never guessed from the value type or size.
             # The config may set memory_limit_unit to "MB" or "GB"; when the
             # unit key is absent the documented unit is MB.
+            # The unit key keeps its default name even when the operator
+            # renamed the limit key itself with the command line option,
+            # so a custom memory key paired with a custom unit key is
+            # only half honoured: the value is found, the unit is read
+            # from the standard name or assumed to be MB.
             memory_unit = str(config.get("memory_limit_unit", "MB")).upper()
             if memory_unit in ("MB", "MIB"):
                 memory_limit_bytes = int(memory_limit * 1024 * 1024)
@@ -151,6 +172,10 @@ def validate_resource_limits(config, cpu_limit_key="cpu_limit", memory_limit_key
                 raise ValueError(f"Invalid memory_limit_unit value: {memory_unit}. Must be 'MB' or 'GB'.")
 
             virtual_memory = psutil.virtual_memory()
+            # This is the host's total memory as psutil sees it. Inside a
+            # container the real ceiling is usually a cgroup limit far
+            # below the host total, so a limit can earn an OK from me
+            # that the machine the config actually runs on cannot meet.
             total_memory = virtual_memory.total
 
             if memory_limit_bytes > total_memory:
